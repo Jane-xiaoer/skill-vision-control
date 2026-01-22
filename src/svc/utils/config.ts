@@ -19,6 +19,7 @@ export function ensureDataDir(): void {
 }
 
 export function getDataDir(): string {
+  ensureDataDir();
   return SVC_DIR;
 }
 

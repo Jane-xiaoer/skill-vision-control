@@ -1,6 +1,8 @@
 import axios, { AxiosError } from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 import { Skill, SkillSource, CheckResult } from '../types';
-import { getSkill, saveSkill, listSkills, getConfig, saveConfig } from '../utils/config';
+import { getSkill, saveSkill, listSkills, getConfig, saveConfig, getDataDir } from '../utils/config';
 
 interface GitHubRelease {
   tag_name: string;
@@ -19,8 +21,103 @@ interface RateLimitInfo {
   resetTime: number;
 }
 
+interface VersionCache {
+  [key: string]: {
+    version: string;
+    checkedAt: string;
+    expiresAt: string;
+  };
+}
+
 // Rate limit tracking
 let rateLimitInfo: RateLimitInfo = { remaining: 60, resetTime: 0 };
+
+// Version cache file
+function getCacheFile(): string {
+  return path.join(getDataDir(), 'version-cache.json');
+}
+
+function loadVersionCache(): VersionCache {
+  const cacheFile = getCacheFile();
+  if (!fs.existsSync(cacheFile)) {
+    return {};
+  }
+  try {
+    return JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveVersionCache(cache: VersionCache): void {
+  const cacheFile = getCacheFile();
+  fs.writeFileSync(cacheFile, JSON.stringify(cache, null, 2));
+}
+
+// Check if cached version is still valid
+function getCachedVersion(source: string): string | null {
+  const cache = loadVersionCache();
+  const entry = cache[source];
+  
+  if (!entry) return null;
+  
+  const now = new Date();
+  const expiresAt = new Date(entry.expiresAt);
+  
+  if (now < expiresAt) {
+    return entry.version;
+  }
+  
+  return null;
+}
+
+// Save version to cache with expiration
+function setCachedVersion(source: string, version: string): void {
+  const config = getConfig();
+  const cacheDays = config.cacheDays || 7; // Default 7 days
+  
+  const cache = loadVersionCache();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + cacheDays * 24 * 60 * 60 * 1000);
+  
+  cache[source] = {
+    version,
+    checkedAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString()
+  };
+  
+  saveVersionCache(cache);
+}
+
+// Clear expired cache entries
+export function cleanExpiredCache(): number {
+  const cache = loadVersionCache();
+  const now = new Date();
+  let removed = 0;
+  
+  for (const key of Object.keys(cache)) {
+    const expiresAt = new Date(cache[key].expiresAt);
+    if (now >= expiresAt) {
+      delete cache[key];
+      removed++;
+    }
+  }
+  
+  saveVersionCache(cache);
+  return removed;
+}
+
+// Force refresh cache for a specific source
+export function invalidateCache(source: string): void {
+  const cache = loadVersionCache();
+  delete cache[source];
+  saveVersionCache(cache);
+}
+
+// Clear all cache
+export function clearAllCache(): void {
+  saveVersionCache({});
+}
 
 // Semver comparison
 export function compareVersions(v1: string, v2: string): number {
@@ -141,22 +238,41 @@ export async function getLatestNpmVersion(packageName: string): Promise<string |
   }
 }
 
-export async function getLatestVersion(source: SkillSource): Promise<string | null> {
-  if (source.type === 'github' && source.repo) {
-    return getLatestGitHubVersion(source.repo);
-  } else if (source.type === 'npm' && source.package) {
-    return getLatestNpmVersion(source.package);
+export async function getLatestVersion(source: SkillSource, forceRefresh: boolean = false): Promise<string | null> {
+  const sourceKey = source.type === 'github' ? `github:${source.repo}` : `npm:${source.package}`;
+  
+  // Check cache first (unless force refresh)
+  if (!forceRefresh) {
+    const cachedVersion = getCachedVersion(sourceKey);
+    if (cachedVersion) {
+      return cachedVersion;
+    }
   }
-  return null;
+  
+  // Fetch from API
+  let version: string | null = null;
+  
+  if (source.type === 'github' && source.repo) {
+    version = await getLatestGitHubVersion(source.repo);
+  } else if (source.type === 'npm' && source.package) {
+    version = await getLatestNpmVersion(source.package);
+  }
+  
+  // Cache the result
+  if (version) {
+    setCachedVersion(sourceKey, version);
+  }
+  
+  return version;
 }
 
-export async function checkSkillUpdate(skillName: string): Promise<CheckResult | null> {
+export async function checkSkillUpdate(skillName: string, forceRefresh: boolean = false): Promise<CheckResult | null> {
   const skill = getSkill(skillName);
   if (!skill) {
     return null;
   }
   
-  const latestVersion = await getLatestVersion(skill.source);
+  const latestVersion = await getLatestVersion(skill.source, forceRefresh);
   if (!latestVersion) {
     return null;
   }
@@ -184,12 +300,12 @@ export async function checkSkillUpdate(skillName: string): Promise<CheckResult |
   };
 }
 
-export async function checkAllUpdates(): Promise<CheckResult[]> {
+export async function checkAllUpdates(forceRefresh: boolean = false): Promise<CheckResult[]> {
   const skills = listSkills();
   const results: CheckResult[] = [];
   
   for (const skill of skills) {
-    const result = await checkSkillUpdate(skill.name);
+    const result = await checkSkillUpdate(skill.name, forceRefresh);
     if (result) {
       results.push(result);
     }

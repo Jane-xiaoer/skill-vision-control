@@ -48,6 +48,7 @@ export interface GlobalConfig {
   dataDir: string;
   defaultInterval: number;
   githubToken?: string;
+  cacheDays?: number;  // Days to cache version info (default: 7, max: 30)
 }
 
 export interface VersionInfo {

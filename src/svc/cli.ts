@@ -8,7 +8,10 @@ import {
   checkSkillUpdate, 
   checkAllUpdates, 
   parseSourceString,
-  getLatestVersion
+  getLatestVersion,
+  cleanExpiredCache,
+  clearAllCache,
+  invalidateCache
 } from './core/checker';
 import {
   downloadVersion,
@@ -45,7 +48,7 @@ const program = new Command();
 program
   .name('svc')
   .description('Skill Vision Control - Safe MCP Skill version manager')
-  .version('1.0.0');
+  .version('1.2.0');
 
 // ===== Add Command =====
 program
@@ -180,12 +183,14 @@ program
 // ===== Check Command =====
 program
   .command('check [name]')
-  .description('Check for updates')
-  .action(async (name?: string) => {
+  .description('Check for updates (uses cache by default)')
+  .option('-f, --force', 'Force refresh from remote API (ignore cache)')
+  .action(async (name: string | undefined, options: { force?: boolean }) => {
+    const forceRefresh = options.force || false;
     const spinner = ora('Checking for updates...').start();
     
     if (name) {
-      const result = await checkSkillUpdate(name);
+      const result = await checkSkillUpdate(name, forceRefresh);
       spinner.stop();
       
       if (!result) {
@@ -193,22 +198,24 @@ program
         return;
       }
       
+      const cacheNote = forceRefresh ? '' : chalk.gray(' (cached)');
       if (result.hasUpdate) {
-        console.log(chalk.blue(`\n${result.skillName}: ${result.currentVersion} → ${result.latestVersion}`));
+        console.log(chalk.blue(`\n${result.skillName}: ${result.currentVersion} → ${result.latestVersion}`) + cacheNote);
         if (result.hasCustomChanges) {
           console.log(chalk.yellow('  ⚠️  You have custom changes. Use "svc merge" to merge.'));
         }
       } else {
-        console.log(chalk.green(`\n${result.skillName} is up to date (${result.currentVersion})`));
+        console.log(chalk.green(`\n${result.skillName} is up to date (${result.currentVersion})`) + cacheNote);
       }
     } else {
-      const results = await checkAllUpdates();
+      const results = await checkAllUpdates(forceRefresh);
       spinner.stop();
       
       const updates = results.filter(r => r.hasUpdate);
+      const cacheNote = forceRefresh ? '' : chalk.gray('\n(Results may be cached. Use --force to refresh from remote.)');
       
       if (updates.length === 0) {
-        console.log(chalk.green('\nAll skills are up to date!'));
+        console.log(chalk.green('\nAll skills are up to date!') + cacheNote);
       } else {
         console.log(chalk.bold(`\n${updates.length} update(s) available:\n`));
         for (const r of updates) {
@@ -531,8 +538,9 @@ program
   .command('config')
   .description('Configure global settings')
   .option('--github-token <token>', 'Set GitHub personal access token for private repos and higher rate limits')
+  .option('--cache-days <days>', 'Set cache duration in days (1-30, default: 7)')
   .option('--show', 'Show current configuration')
-  .action(async (options: { githubToken?: string; show?: boolean }) => {
+  .action(async (options: { githubToken?: string; cacheDays?: string; show?: boolean }) => {
     const { loadGlobalConfig, saveGlobalConfig } = await import('./utils/config');
     const config = loadGlobalConfig();
     
@@ -541,19 +549,109 @@ program
       console.log(`  Version:      ${config.version}`);
       console.log(`  Data Dir:     ${config.dataDir}`);
       console.log(`  Interval:     ${config.defaultInterval} days`);
+      console.log(`  Cache:        ${config.cacheDays || 7} days`);
       console.log(`  GitHub Token: ${config.githubToken ? chalk.green('Set') : chalk.yellow('Not set')}`);
+      console.log();
+      console.log(chalk.gray('  Cache means version info is stored locally and not re-fetched'));
+      console.log(chalk.gray('  from GitHub/npm until the cache expires.'));
       return;
     }
     
+    let changed = false;
+    
     if (options.githubToken) {
       config.githubToken = options.githubToken;
-      saveGlobalConfig(config);
+      changed = true;
       console.log(chalk.green('GitHub token saved'));
       console.log(chalk.gray('This enables access to private repos and increases API rate limit.'));
     }
     
-    if (!options.githubToken && !options.show) {
-      console.log('Usage: svc config --github-token <token> or svc config --show');
+    if (options.cacheDays) {
+      const days = parseInt(options.cacheDays);
+      if (isNaN(days) || days < 1 || days > 30) {
+        console.log(chalk.red('Cache days must be between 1 and 30'));
+        return;
+      }
+      config.cacheDays = days;
+      changed = true;
+      console.log(chalk.green(`Cache duration set to ${days} day(s)`));
+      console.log(chalk.gray('Version info will be cached and not re-fetched until expired.'));
+      console.log(chalk.gray('Use "svc check --force" to ignore cache and fetch fresh data.'));
+    }
+    
+    if (changed) {
+      saveGlobalConfig(config);
+    }
+    
+    if (!options.githubToken && !options.cacheDays && !options.show) {
+      console.log('Usage:');
+      console.log('  svc config --show                    Show current configuration');
+      console.log('  svc config --github-token <token>    Set GitHub token');
+      console.log('  svc config --cache-days <days>       Set cache duration (1-30 days)');
+    }
+  });
+
+// ===== Cache Command =====
+program
+  .command('cache')
+  .description('Manage version cache')
+  .option('--clear', 'Clear all cached version info')
+  .option('--clean', 'Remove expired cache entries')
+  .option('--show', 'Show cache statistics')
+  .action(async (options: { clear?: boolean; clean?: boolean; show?: boolean }) => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const { getDataDir } = await import('./utils/config');
+    
+    const cacheFile = path.join(getDataDir(), 'version-cache.json');
+    
+    if (options.clear) {
+      clearAllCache();
+      console.log(chalk.green('Cache cleared'));
+      return;
+    }
+    
+    if (options.clean) {
+      const removed = cleanExpiredCache();
+      console.log(chalk.green(`Removed ${removed} expired cache entries`));
+      return;
+    }
+    
+    // Show cache info
+    if (!fs.existsSync(cacheFile)) {
+      console.log(chalk.yellow('No cache file found'));
+      return;
+    }
+    
+    try {
+      const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
+      const entries = Object.keys(cache);
+      const now = new Date();
+      let valid = 0;
+      let expired = 0;
+      
+      console.log(chalk.bold('\nCache Statistics:\n'));
+      
+      for (const key of entries) {
+        const entry = cache[key];
+        const expiresAt = new Date(entry.expiresAt);
+        if (now < expiresAt) {
+          valid++;
+          const daysLeft = Math.ceil((expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+          console.log(`  ${chalk.green('●')} ${key}`);
+          console.log(`    Version: ${entry.version}, expires in ${daysLeft} day(s)`);
+        } else {
+          expired++;
+          console.log(`  ${chalk.red('○')} ${key} (expired)`);
+        }
+      }
+      
+      console.log();
+      console.log(`  Total: ${entries.length} entries (${valid} valid, ${expired} expired)`);
+      console.log(chalk.gray('\n  Use "svc cache --clean" to remove expired entries'));
+      console.log(chalk.gray('  Use "svc cache --clear" to clear all cache'));
+    } catch {
+      console.log(chalk.red('Error reading cache file'));
     }
   });
 
