@@ -1,10 +1,10 @@
 {
   "name": "skill-vision-control",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Safe MCP Skill version manager - detect updates, parallel testing, smart merge, confirm before replace",
   "main": "dist/index.js",
   "bin": {
-    "svc": "dist/svc/cli.js"
+    "svc": "./dist/svc/cli.js"
   },
   "scripts": {
     "build": "tsc",
@@ -55,6 +55,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/skill-vision-control.git"
+    "url": "https://github.com/Jane-xiaoer/skill-vision-control.git"
   }
 }

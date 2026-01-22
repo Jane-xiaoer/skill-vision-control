@@ -47,6 +47,7 @@ export interface GlobalConfig {
   version: string;
   dataDir: string;
   defaultInterval: number;
+  githubToken?: string;
 }
 
 export interface VersionInfo {

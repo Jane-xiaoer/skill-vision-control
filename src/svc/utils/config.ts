@@ -82,6 +82,15 @@ export function saveGlobalConfig(config: GlobalConfig): void {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
+// Alias for compatibility
+export function getConfig(): GlobalConfig {
+  return loadGlobalConfig();
+}
+
+export function saveConfig(config: GlobalConfig): void {
+  saveGlobalConfig(config);
+}
+
 export function getSkill(name: string): Skill | null {
   const config = loadSkillsConfig();
   return config.skills[name] || null;

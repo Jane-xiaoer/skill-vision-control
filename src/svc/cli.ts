@@ -419,7 +419,35 @@ program
       return;
     }
     
-    console.log(chalk.green(`Confirmed ${skill.activeVersion} as active version`));
+    // Show current state
+    console.log(chalk.bold(`\nConfirming version for ${name}:`));
+    console.log(`  Current: ${chalk.cyan(skill.activeVersion)} (${skill.activeType})`);
+    
+    if (skill.pending?.version) {
+      console.log(`  Pending: ${chalk.yellow(skill.pending.version)}`);
+    }
+    
+    // Ask for confirmation
+    const { confirmAction } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmAction',
+      message: `Confirm ${skill.activeVersion} as the official active version?`,
+      default: true
+    }]);
+    
+    if (!confirmAction) {
+      console.log(chalk.yellow('Cancelled'));
+      return;
+    }
+    
+    // Update skill - clear pending, update official version
+    if (skill.pending?.version && skill.activeType === 'merged') {
+      skill.officialVersion = skill.pending.version;
+    }
+    skill.pending = undefined;
+    saveSkill(skill);
+    
+    console.log(chalk.green(`\nConfirmed ${skill.activeVersion} as active version`));
     
     const { cleanup } = await inquirer.prompt([{
       type: 'confirm',
@@ -496,6 +524,149 @@ schedule
   .description('Manually trigger a check')
   .action(async () => {
     await runScheduledCheck();
+  });
+
+// ===== Config Command =====
+program
+  .command('config')
+  .description('Configure global settings')
+  .option('--github-token <token>', 'Set GitHub personal access token for private repos and higher rate limits')
+  .option('--show', 'Show current configuration')
+  .action(async (options: { githubToken?: string; show?: boolean }) => {
+    const { loadGlobalConfig, saveGlobalConfig } = await import('./utils/config');
+    const config = loadGlobalConfig();
+    
+    if (options.show) {
+      console.log(chalk.bold('\nCurrent Configuration:\n'));
+      console.log(`  Version:      ${config.version}`);
+      console.log(`  Data Dir:     ${config.dataDir}`);
+      console.log(`  Interval:     ${config.defaultInterval} days`);
+      console.log(`  GitHub Token: ${config.githubToken ? chalk.green('Set') : chalk.yellow('Not set')}`);
+      return;
+    }
+    
+    if (options.githubToken) {
+      config.githubToken = options.githubToken;
+      saveGlobalConfig(config);
+      console.log(chalk.green('GitHub token saved'));
+      console.log(chalk.gray('This enables access to private repos and increases API rate limit.'));
+    }
+    
+    if (!options.githubToken && !options.show) {
+      console.log('Usage: svc config --github-token <token> or svc config --show');
+    }
+  });
+
+// ===== Diff Command =====
+program
+  .command('diff <name>')
+  .description('Show differences between versions')
+  .option('-o, --official', 'Compare current with latest official')
+  .option('-c, --custom', 'Compare official with your custom changes')
+  .action(async (name: string, options: { official?: boolean; custom?: boolean }) => {
+    const skill = getSkill(name);
+    if (!skill) {
+      console.log(chalk.red(`Skill "${name}" not found`));
+      return;
+    }
+    
+    const { getSkillVersionsDir } = await import('./utils/config');
+    const { listFiles } = await import('./utils/fs');
+    const fs = await import('fs');
+    const path = await import('path');
+    
+    const versionsDir = getSkillVersionsDir(name);
+    
+    if (options.custom && skill.hasCustomChanges) {
+      // Compare official vs custom
+      const officialDir = path.join(versionsDir, 'official', skill.officialVersion);
+      const customDir = path.join(versionsDir, 'custom', `${skill.customBase || skill.officialVersion}-custom`);
+      
+      if (!fs.existsSync(officialDir) || !fs.existsSync(customDir)) {
+        console.log(chalk.yellow('Version directories not found'));
+        return;
+      }
+      
+      console.log(chalk.bold(`\nDiff: Official ${skill.officialVersion} vs Custom\n`));
+      
+      const officialFiles = new Set(listFiles(officialDir, true));
+      const customFiles = new Set(listFiles(customDir, true));
+      
+      // Show added files
+      for (const file of customFiles) {
+        if (!officialFiles.has(file)) {
+          console.log(chalk.green(`  + ${file}`));
+        }
+      }
+      
+      // Show modified files
+      for (const file of officialFiles) {
+        if (customFiles.has(file)) {
+          const officialContent = fs.readFileSync(path.join(officialDir, file), 'utf-8');
+          const customContent = fs.readFileSync(path.join(customDir, file), 'utf-8');
+          if (officialContent !== customContent) {
+            console.log(chalk.yellow(`  ~ ${file}`));
+          }
+        }
+      }
+      
+      // Show deleted files
+      for (const file of officialFiles) {
+        if (!customFiles.has(file)) {
+          console.log(chalk.red(`  - ${file}`));
+        }
+      }
+    } else if (skill.pending?.version) {
+      // Compare current vs pending
+      console.log(chalk.bold(`\nDiff: ${skill.officialVersion} vs ${skill.pending.version}\n`));
+      console.log(chalk.gray('Download the new version first to see detailed diff.'));
+      console.log(chalk.gray('Run: svc download ' + name));
+    } else {
+      console.log(chalk.yellow('No pending update or custom changes to compare'));
+    }
+  });
+
+// ===== Test Command =====
+program
+  .command('test <name>')
+  .description('Test a specific version before switching')
+  .option('-v, --version <version>', 'Version to test')
+  .option('-m, --merged', 'Test the merged version')
+  .action(async (name: string, options: { version?: string; merged?: boolean }) => {
+    const skill = getSkill(name);
+    if (!skill) {
+      console.log(chalk.red(`Skill "${name}" not found`));
+      return;
+    }
+    
+    let testVersion = options.version || skill.activeVersion;
+    let testType: 'official' | 'custom' | 'merged' = 'official';
+    
+    if (options.merged && skill.pending?.mergedVersion) {
+      testVersion = skill.pending.mergedVersion;
+      testType = 'merged';
+    }
+    
+    console.log(chalk.bold(`\nTesting ${name} version ${testVersion}...\n`));
+    
+    // Create a test session
+    const testSession = {
+      skillName: name,
+      version: testVersion,
+      type: testType,
+      startedAt: new Date().toISOString(),
+      status: 'running' as const
+    };
+    
+    console.log(`  Skill:   ${chalk.cyan(name)}`);
+    console.log(`  Version: ${chalk.cyan(testVersion)} (${testType})`);
+    console.log(`  Status:  ${chalk.yellow('Testing...')}`);
+    console.log();
+    console.log(chalk.gray('The version is now active for testing.'));
+    console.log(chalk.gray('Run your tests, then use "svc confirm" to keep or "svc rollback" to revert.'));
+    
+    // Switch to test version temporarily
+    switchVersion(name, testVersion, testType);
   });
 
 // Initialize data directory
