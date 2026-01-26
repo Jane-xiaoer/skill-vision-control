@@ -91,3 +91,15 @@ export interface TestSession {
   startedAt: string;
   status: 'running' | 'completed' | 'failed';
 }
+
+export interface SecurityScanConfig {
+  enabled: boolean;
+  autoReject: boolean;  // Auto reject CRITICAL risk
+  allowedPatterns: string[];  // Patterns to whitelist
+}
+
+export interface DownloadOptions {
+  skipSecurity?: boolean;
+  force?: boolean;
+  verbose?: boolean;
+}

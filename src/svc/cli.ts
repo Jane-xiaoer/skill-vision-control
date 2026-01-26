@@ -42,13 +42,18 @@ import {
   ensureDataDir
 } from './utils/config';
 import { Skill } from './types';
+import {
+  scanSkillDirectory,
+  formatScanResult,
+  isSkillSafe
+} from './core/security';
 
 const program = new Command();
 
 program
   .name('svc')
-  .description('Skill Vision Control - Safe MCP Skill version manager')
-  .version('1.2.0');
+  .description('Skill Vision Control - Safe MCP Skill version manager with security scanning')
+  .version('1.3.0');
 
 // ===== Add Command =====
 program
@@ -231,8 +236,10 @@ program
 // ===== Download Command =====
 program
   .command('download <name>')
-  .description('Download new version without replacing current')
-  .action(async (name: string) => {
+  .description('Download new version without replacing current (runs security scan)')
+  .option('--skip-security', 'Skip security scan (not recommended)')
+  .option('-v, --verbose', 'Show detailed scan results')
+  .action(async (name: string, options: { skipSecurity?: boolean; verbose?: boolean }) => {
     const skill = getSkill(name);
     if (!skill) {
       console.log(chalk.red(`Skill "${name}" not found`));
@@ -247,11 +254,60 @@ program
     const spinner = ora(`Downloading ${skill.pending.version}...`).start();
     const success = await downloadVersion(name, skill.pending.version);
     
-    if (success) {
-      spinner.succeed(`Downloaded ${chalk.green(skill.pending.version)} (old version preserved)`);
-    } else {
+    if (!success) {
       spinner.fail('Download failed');
+      return;
     }
+    
+    spinner.succeed(`Downloaded ${chalk.green(skill.pending.version)}`);
+    
+    // Run security scan unless skipped
+    if (!options.skipSecurity) {
+      const { getSkillVersionsDir } = await import('./utils/config');
+      const path = await import('path');
+      
+      const downloadDir = path.join(getSkillVersionsDir(name), 'official', skill.pending.version);
+      
+      console.log(chalk.bold('\n🛡️  Running security scan...\n'));
+      const scanResult = scanSkillDirectory(downloadDir);
+      
+      console.log(formatScanResult(scanResult, options.verbose));
+      
+      if (scanResult.recommendation === 'REJECT') {
+        console.log(chalk.red.bold('\n⚠️  Security scan found critical issues!'));
+        
+        const { proceed } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'proceed',
+          message: 'Do you still want to proceed? (NOT RECOMMENDED)',
+          default: false
+        }]);
+        
+        if (!proceed) {
+          // Cleanup downloaded version
+          const fs = await import('fs');
+          fs.rmSync(downloadDir, { recursive: true, force: true });
+          console.log(chalk.yellow('Download cancelled. Files removed.'));
+          return;
+        }
+      } else if (scanResult.recommendation === 'REVIEW') {
+        const { proceed } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'proceed',
+          message: 'Security scan found items that need review. Continue?',
+          default: true
+        }]);
+        
+        if (!proceed) {
+          console.log(chalk.yellow('Download cancelled.'));
+          return;
+        }
+      }
+    } else {
+      console.log(chalk.yellow('\n⚠️  Security scan skipped (--skip-security)'));
+    }
+    
+    console.log(chalk.green('\n✓ Download complete (old version preserved)'));
   });
 
 // ===== Versions Command =====
@@ -765,6 +821,116 @@ program
     
     // Switch to test version temporarily
     switchVersion(name, testVersion, testType);
+  });
+
+// ===== Scan Command =====
+program
+  .command('scan <path>')
+  .description('Run security scan on a skill directory (Sentinel integration)')
+  .option('-v, --verbose', 'Show detailed scan results')
+  .option('-o, --output <file>', 'Save report to file')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath: string, options: { verbose?: boolean; output?: string; json?: boolean }) => {
+    const path = await import('path');
+    const fs = await import('fs');
+    
+    // Resolve path
+    const resolvedPath = path.resolve(targetPath);
+    
+    if (!fs.existsSync(resolvedPath)) {
+      console.log(chalk.red(`Path not found: ${resolvedPath}`));
+      return;
+    }
+    
+    const spinner = ora('Scanning...').start();
+    const result = scanSkillDirectory(resolvedPath);
+    spinner.stop();
+    
+    if (options.json) {
+      const jsonOutput = JSON.stringify(result, null, 2);
+      if (options.output) {
+        fs.writeFileSync(options.output, jsonOutput);
+        console.log(chalk.green(`Report saved to ${options.output}`));
+      } else {
+        console.log(jsonOutput);
+      }
+      return;
+    }
+    
+    const report = formatScanResult(result, options.verbose);
+    
+    if (options.output) {
+      fs.writeFileSync(options.output, report);
+      console.log(chalk.green(`Report saved to ${options.output}`));
+      console.log(`\n${result.summary}`);
+    } else {
+      console.log(report);
+    }
+  });
+
+// ===== Audit Command =====
+program
+  .command('audit [name]')
+  .description('Run security audit on installed skill(s)')
+  .option('-v, --verbose', 'Show detailed results')
+  .action(async (name: string | undefined, options: { verbose?: boolean }) => {
+    const path = await import('path');
+    
+    if (name) {
+      // Audit specific skill
+      const skill = getSkill(name);
+      if (!skill) {
+        console.log(chalk.red(`Skill "${name}" not found`));
+        return;
+      }
+      
+      const { getSkillVersionsDir } = await import('./utils/config');
+      const versionsDir = getSkillVersionsDir(name);
+      const activeDir = path.join(versionsDir, skill.activeType, skill.activeVersion);
+      
+      console.log(chalk.bold(`\n🛡️  Auditing ${name} (${skill.activeVersion})...\n`));
+      
+      const result = scanSkillDirectory(activeDir);
+      console.log(formatScanResult(result, options.verbose));
+    } else {
+      // Audit all skills
+      const skills = listSkills();
+      
+      if (skills.length === 0) {
+        console.log(chalk.yellow('No skills registered.'));
+        return;
+      }
+      
+      console.log(chalk.bold(`\n🛡️  Security Audit - ${skills.length} skill(s)\n`));
+      console.log('─'.repeat(50));
+      
+      const { getSkillVersionsDir } = await import('./utils/config');
+      
+      for (const skill of skills) {
+        const versionsDir = getSkillVersionsDir(skill.name);
+        const activeDir = path.join(versionsDir, skill.activeType, skill.activeVersion);
+        
+        const result = scanSkillDirectory(activeDir);
+        
+        const icon = result.riskLevel === 'SAFE' ? chalk.green('✓') : 
+                     result.riskLevel === 'CRITICAL' || result.riskLevel === 'HIGH' ? chalk.red('✗') :
+                     chalk.yellow('!');
+        
+        console.log(`${icon} ${chalk.bold(skill.name)} (${skill.activeVersion})`);
+        console.log(`  ${result.summary}`);
+        
+        if (options.verbose && result.alerts.length > 0) {
+          const criticals = result.alerts.filter(a => a.level === 'CRITICAL').slice(0, 3);
+          for (const alert of criticals) {
+            console.log(chalk.red(`    - ${alert.description}`));
+          }
+        }
+        console.log();
+      }
+      
+      console.log('─'.repeat(50));
+      console.log(chalk.gray('Use "svc audit <name> -v" for detailed scan of a specific skill'));
+    }
   });
 
 // Initialize data directory
