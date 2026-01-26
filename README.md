@@ -8,6 +8,7 @@
 ## Features
 
 - 🔍 **Update Detection** - Automatically detect new versions from GitHub/npm
+- 🛡️ **Security Scanning** - Auto scan before download (Sentinel integration)
 - 📦 **Version Management** - Keep multiple versions, switch anytime
 - 🔀 **Smart Merge** - Merge official updates with your custom changes
 - 🧪 **A/B Testing** - Test new versions before switching
@@ -90,6 +91,14 @@ svc merge weather
 | `svc schedule disable` | Disable scheduled checks |
 | `svc schedule run` | Manually trigger check |
 
+### Security Scanning
+
+| Command | Description |
+|---------|-------------|
+| `svc scan <path>` | Scan any skill directory for security issues |
+| `svc audit [name]` | Audit installed skill(s) |
+| `svc download <name> --skip-security` | Download without security scan (not recommended) |
+
 ## Workflow Examples
 
 ### Basic Update Flow
@@ -109,6 +118,29 @@ svc switch weather -v v1.1.0 -t official
 svc confirm weather
 # or
 svc rollback weather
+```
+
+### Security Audit Before Install
+
+```bash
+# Scan a skill before installing
+svc scan ~/Downloads/some-mcp-skill
+
+# Output:
+# 🛡️  Sentinel Security Scan Report
+# ══════════════════════════════════════════════════
+# Risk Level: MEDIUM
+# Recommendation: REVIEW
+# 
+# ⚠️  SUSPICIOUS: 3 items found
+#    - src/api.ts:15 - Network request (axios)
+#    - src/config.ts:8 - Environment variable access
+
+# Audit all installed skills
+svc audit
+
+# Audit specific skill with details
+svc audit weather -v
 ```
 
 ### Custom Changes + Update
@@ -181,6 +213,52 @@ All data is stored in `~/.svc/`:
         ├── custom/
         ├── merged/
         └── active -> ...
+```
+
+## Security Scanning
+
+SVC integrates [Sentinel](https://github.com/Jane-xiaoer/skill-vision-control) security patterns for automatic code scanning.
+
+### Detection Capabilities
+
+| Level | Description | Examples |
+|-------|-------------|----------|
+| **CRITICAL** | High-risk patterns | `eval()`, `exec()`, `rm -rf`, registry access |
+| **SUSPICIOUS** | Needs review | Network requests, env vars, file operations |
+| **WARNING** | Potential issues | Long lines, high entropy files |
+
+### Risk Levels
+
+| Level | Action |
+|-------|--------|
+| `SAFE` | Safe to install |
+| `LOW` | Minor concerns, review recommended |
+| `MEDIUM` | Review required before install |
+| `HIGH` | Significant risks detected |
+| `CRITICAL` | Do not install without careful review |
+
+### Auto-Scan on Download
+
+When you run `svc download`, security scan runs automatically:
+
+```bash
+svc download weather
+# 🛡️  Running security scan...
+# ✅ Security scan passed
+# ✓ Download complete
+```
+
+If issues found:
+```bash
+svc download untrusted-skill
+# 🛡️  Running security scan...
+# 🛑 Security scan found critical issues!
+# ? Do you still want to proceed? (NOT RECOMMENDED) (y/N)
+```
+
+To skip (not recommended):
+```bash
+svc download weather --skip-security
 ```
 
 ## Configuration
